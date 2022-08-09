@@ -1,0 +1,52 @@
+model:
+  feature_extractor: "facebook/vit-mae-base"
+  image_size: 672
+  patch_size: 28
+  mask_ratio: 0.3
+  use_mae: True
+  use_dit: True
+
+data:
+  img_dirs:
+    - "D:/dataset/IMG/"
+  clean: False
+  max_img_num: 1000000
+
+dataloader:
+  batch_accum: 16
+  batch_size: 16
+  shuffle: True
+  drop_last: False
+  num_workers: 4
+  pin_memory: True
+  prefetch_factor: 2
+  persistent_workers: True
+
+optimizer:
+  type: "AdamW"
+  lr: 0.0001
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.05
+  scheduler: "CosineAnnealingLR"
+  T_max: 100
+  eta_min: 0
+
+training:
+  device: "cuda"
+  use_amp: True  # 混合精度训练
+  start_epoch: 1
+  epochs: 400
+  epoch_save_interval: 1
+  step_save_interval: 5000
+  loss_print_interval: 50
+  work_dir: "./work_dir"
+  model_save_name: "DocMae{}_epoch{}.pkl"
+
+distributed:
+  dist: True
+  rank: 0
+  local_rank: -1
+  world_size: 1
+  init_method: "tcp://127.0.0.1:23333"
+  backend: "gloo"
