@@ -5,11 +5,13 @@ import warnings
 import numpy as np
 import torch
 import torch.nn as nn
+import yaml
 from PIL import Image
+from munch import Munch
 from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
 from torch.cuda.amp import autocast as autocast, GradScaler
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import ExponentialLR, ConstantLR
+from torch.optim.lr_scheduler import ExponentialLR, ConstantLR, CosineAnnealingLR
 from torch.utils import data
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -17,7 +19,7 @@ from transformers import AutoFeatureExtractor, ViTMAEModel
 from transformers import ViTMAEConfig
 
 warnings.filterwarnings("ignore")
-
+# torch.backends.cudnn.benchmark = True
 
 CLASSES = [
     'artist_',
@@ -77,7 +79,7 @@ class Mae(nn.Module):
 
         config = ViTMAEConfig(
             image_size=672,
-            patch_size=32,
+            patch_size=28,
             mask_ratio=0,
         )
         self.mae = ViTMAEModel(config)
@@ -91,26 +93,23 @@ class Mae(nn.Module):
     def forward(self, pixel_values):
         output = self.mae(pixel_values)
         output = output['last_hidden_state']
-        # output = torch.mean(output, dim=1)
-        # output = torch.max(output, dim=1).values
-        output = output[:, 0, :]
+        output = torch.mean(output, dim=1)
         return self.cls(output)
 
     def load_from_DocMae(self):
-        docmae672_pretrained = torch.load(self.ckp_pth)
-        docmae_state_dict = docmae672_pretrained.mae.state_dict()
+        docmae_state_dict = torch.load(self.ckp_pth)
         mae_state_dict = self.mae.state_dict()
         for key in mae_state_dict:
-            if f'vit.{key}' in docmae_state_dict:
-                mae_state_dict[key] = docmae_state_dict[f'vit.{key}']
+            if f'mae.vit.{key}' in docmae_state_dict:
+                mae_state_dict[key] = docmae_state_dict[f'mae.vit.{key}']
         self.mae.load_state_dict(mae_state_dict)
 
 
 def train(model, total_epoch):
     logger.info('start fine-tuning')
-    optim = AdamW(model.parameters(), lr=1e-5)
-    # optim = AdamW(params=model.parameters(), lr=1e-4, betas=(0.9, 0.999), weight_decay=0.05)
-    # scheduler = CosineAnnealingLR(optim, T_max=total_epoch, eta_min=1e-5)
+    # optim = AdamW(model.parameters(), lr=1e-5)
+    optim = AdamW(params=model.parameters(), lr=1e-4, betas=(0.9, 0.999), weight_decay=0.05)
+    scheduler = CosineAnnealingLR(optim, T_max=total_epoch, eta_min=5e-6)
     # scheduler = ExponentialLR(optim, gamma=0.9)
     scheduler = ConstantLR(optim, factor=1, total_iters=0)
     scaler = GradScaler()
@@ -136,13 +135,13 @@ def train(model, total_epoch):
 
             torch.cuda.empty_cache()
 
-        scheduler.step()
         torch.save(model, './ckp/mae672_cls.ckp')
         acc, f1, p, r = test(model, val_loader)
-        logger.info(f'epoch {epoch}, val acc: {acc}, f1: {f1}, p: {p}, r: {r}, lr: {scheduler.get_last_lr()}')
+        logger.info(f'epoch {epoch}, val acc: {acc}, f1: {f1}, p: {p}, r: {r}, lr: {scheduler.get_last_lr()[0]}')
         if f1 > best_f1:
             best_f1 = f1
             torch.save(model, './ckp/mae672_cls_best.ckp')
+        scheduler.step()
 
 
 def test(mae, test_loader):
@@ -205,8 +204,9 @@ if __name__ == '__main__':
                              collate_fn=test_dataset.collate_fn)
 
     logger.info('categories: ' + str(CLASSES))
+    cfg = Munch.fromDict(yaml.safe_load(open('mae_pretrain.yaml', 'r', encoding='utf8').read()))
 
-    model = Mae(ckp_pth='./work_dir/ckp/DocMae672_epoch15.ckp').to(device)
+    model = Mae(ckp_pth='./work_dir/pkl/DocMae672_epoch4.pkl').to(device)
     train(model, total_epoch=20)
     acc, f1, p, r = test(torch.load('./ckp/mae672_cls_best.ckp'), test_loader)
     logger.info(f'test acc: {acc}, f1: {f1}, p: {p}, r: {r}')

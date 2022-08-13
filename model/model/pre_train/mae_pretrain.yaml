@@ -10,7 +10,7 @@ data:
   img_dirs:
     - "D:/dataset/IMG/"
   clean: False
-  max_img_num: 1000000
+  max_img_num: -1
 
 dataloader:
   batch_accum: 16
@@ -29,14 +29,13 @@ optimizer:
   beta2: 0.999
   weight_decay: 0.05
   scheduler: "CosineAnnealingLR"
-  T_max: 100
   eta_min: 0
 
 training:
   device: "cuda"
   use_amp: True  # 混合精度训练
   start_epoch: 1
-  epochs: 400
+  epochs: 100
   epoch_save_interval: 1
   step_save_interval: 5000
   loss_print_interval: 50

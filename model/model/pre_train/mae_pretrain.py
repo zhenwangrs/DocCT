@@ -27,7 +27,8 @@ class PretrainDataset(torch.utils.data.Dataset):
         self.data_paths = cfg.data.img_dirs
         for data_path in self.data_paths:
             self.img_paths.extend(get_image_paths(data_path))
-        self.img_paths = self.img_paths[:cfg.data.max_img_num]
+        if cfg.data.max_img_num > 0:
+            self.img_paths = self.img_paths[:cfg.data.max_img_num]
 
     def __getitem__(self, idx):
         img_path = self.img_paths[idx]
@@ -105,7 +106,7 @@ def pretrain(model, cfg):
                   lr=cfg.optimizer.lr,
                   betas=(cfg.optimizer.beta1, cfg.optimizer.beta2),
                   weight_decay=cfg.optimizer.weight_decay)
-    scheduler = CosineAnnealingLR(optim, T_max=cfg.optimizer.T_max, eta_min=cfg.optimizer.eta_min)
+    scheduler = CosineAnnealingLR(optim, T_max=cfg.training.epochs, eta_min=cfg.optimizer.eta_min)
     for epoch in range(cfg.training.start_epoch-1):
         scheduler.step()
 
@@ -152,11 +153,11 @@ def pretrain(model, cfg):
                 avg_epoch_loss = np.around(np.mean(epoch_loss), 4)
                 logger.info(f'epoch: [{epoch}/{cfg.training.epochs}], iter: [{step}/{total_iters}], batch_loss: {loss_value}, epoch_loss: {avg_epoch_loss}')
             if step % cfg.training.step_save_interval == 0:
-                model_save_path = f'{cfg.ckp_dir}/{cfg.training.model_save_name}'.format(cfg.model.image_size, epoch)
+                model_save_path = f'{cfg.pkl_dir}/{cfg.training.model_save_name}'.format(cfg.model.image_size, epoch)
                 torch.save(model.state_dict(), model_save_path)
 
         if epoch % cfg.training.epoch_save_interval == 0:
-            model_save_path = f'{cfg.ckp_dir}/{cfg.training.model_save_name}'.format(cfg.model.image_size, epoch)
+            model_save_path = f'{cfg.pkl_dir}/{cfg.training.model_save_name}'.format(cfg.model.image_size, epoch)
             torch.save(model.state_dict(), model_save_path)
 
         avg_epoch_loss = np.around(np.mean(epoch_loss), 4)
@@ -169,7 +170,7 @@ def get_args():
     parser = argparse.ArgumentParser('DocMAE')
     parser.add_argument('--config', default='./mae_pretrain.yaml', type=str, help='path to config file')
     parser.add_argument('--work_dir', default='./work_dir/', type=str, help='path to config file')
-    parser.add_argument('--resume', default=False, type=bool, help='if resume from last checkpoint')
+    parser.add_argument('--resume', default=True, type=bool, help='if resume from last checkpoint')
     # parser.add_argument('--resume', default='', type=str, help='path to resume from')
     # parser.add_argument('--dist', action='store_true', help='run with distributed parallel')
     # parser.add_argument('--skip_validate', action='store_true', help='skip validation')
@@ -183,39 +184,41 @@ if __name__ == '__main__':
 
     work_dir = args.work_dir
     log_dir = os.path.join(work_dir, 'log')
-    ckp_dir = os.path.join(work_dir, 'pkl')
+    pkl_dir = os.path.join(work_dir, 'pkl')
     tensorboard_dir = os.path.join(work_dir, 'tensorboard')
     if not os.path.exists(work_dir):
         os.makedirs(work_dir)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
-    if not os.path.exists(ckp_dir):
-        os.makedirs(ckp_dir)
+    if not os.path.exists(pkl_dir):
+        os.makedirs(pkl_dir)
     if not os.path.exists(tensorboard_dir):
         os.makedirs(tensorboard_dir)
     cfg.work_dir = work_dir
     cfg.log_dir = log_dir
-    cfg.ckp_dir = ckp_dir
+    cfg.pkl_dir = pkl_dir
     cfg.tensorboard_dir = tensorboard_dir
 
     if not args.resume:
         model = Mae(cfg.model).to(cfg.training.device)
-        model_save_path = f'{cfg.ckp_dir}/{cfg.training.model_save_name}'.format(cfg.model.image_size, 0)
+        model_save_path = f'{cfg.pkl_dir}/{cfg.training.model_save_name}'.format(cfg.model.image_size, 0)
         torch.save(model.state_dict(), model_save_path)
         cfg.start_epoch = 1
     else:
         r = re.compile(r'^.*_epoch(\d+)\.pkl$')
-        ckp_files = [os.path.basename(f) for f in glob.glob(os.path.join(cfg.ckp_dir, '*.ckp'))]
-        ckp_files = sorted(ckp_files, key=lambda x: int(r.match(x).group(1)))
-        ckp_file = ckp_files[-1]
+        pkl_files = [os.path.basename(f) for f in glob.glob(os.path.join(cfg.pkl_dir, '*.pkl'))]
+        pkl_files = sorted(pkl_files, key=lambda x: int(r.match(x).group(1)))
+        pkl_file = pkl_files[-1]
         model = Mae(cfg.model).to(cfg.training.device)
-        model.load_state_dict(torch.load(os.path.join(cfg.ckp_dir, ckp_file)))
-        # model = torch.load(os.path.join(cfg.ckp_dir, ckp_file))
-        last_epoch = ckp_file.split('_')[-1].split('.')[0]
+        model.load_state_dict(torch.load(os.path.join(cfg.pkl_dir, pkl_file)))
+        # model = torch.load(os.path.join(cfg.pkl_dir, pkl_file))
+        last_epoch = pkl_file.split('_')[-1].split('.')[0]
         last_epoch = int(last_epoch.replace('epoch', ''))
         cfg.training.start_epoch = last_epoch + 1
 
     logger = build_logger(save_path=os.path.join(cfg.log_dir, 'pretrain.log'), task='DocMAE_Pretrain')
     tensorboard_writer = SummaryWriter(cfg.tensorboard_dir)  # tensorboard --logdir=./path/to/log --port 8123
     logger.info(f'Starting from epoch {cfg.training.start_epoch}')
+
+    model = model.to(cfg.training.device)
     pretrain(model, cfg)
