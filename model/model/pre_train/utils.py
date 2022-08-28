@@ -18,7 +18,7 @@ def build_logger(save_path, task):
     return logger
 
 
-def image_random_crop(image, prob=0.7):
+def image_random_crop(image, prob):
     if random.random() < prob:
         w, h = image.size
         left = random.randint(0, w // 2)
@@ -39,7 +39,9 @@ def get_image_paths(img_dir_path):
     img_paths = []
     for root, dirs, files in os.walk(img_dir_path):
         for file in files:
-            if file.lower().endswith('.jpg') or file.lower().endswith('png'):
+            if file.lower().endswith('.jpg') \
+                    or file.lower().endswith('.jpeg')\
+                    or file.lower().endswith('png'):
                 img_paths.append(os.path.join(root, file))
     return img_paths
 

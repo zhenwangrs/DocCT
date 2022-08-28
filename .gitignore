@@ -7,9 +7,12 @@
 *pkl
 main.py
 *log.txt
+*.log
 /model/dataset/
 /model/model/cls/
 /model/model/pre_train/test.py
 /model/model/pre_train/work_dir/
 /model/model/pre_train/ckp/
 
+/model/model/pre_train/error_img/
+/model/model/pre_train/wandb/

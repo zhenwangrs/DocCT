@@ -1,6 +1,7 @@
 import argparse
 import glob
 import re
+from collections import OrderedDict
 
 import numpy as np
 import torch
@@ -34,7 +35,7 @@ class PretrainDataset(torch.utils.data.Dataset):
         img_path = self.img_paths[idx]
         try:
             image = Image.open(img_path)
-            image = image_random_crop(image)
+            image = image_random_crop(image, prob=self.cfg.data.crop_prob)
             if image.mode != 'RGB':
                 image = image.convert('RGB')
             return image
@@ -49,8 +50,7 @@ class PretrainDataset(torch.utils.data.Dataset):
         images = []
         for img in batch:
             images.append(img)
-        image_feats = self.feature_extractor(images=images, return_tensors="pt")['pixel_values'].cuda(
-            non_blocking=True)
+        image_feats = self.feature_extractor(images=images, return_tensors="pt")['pixel_values']
         return image_feats
 
 
@@ -120,7 +120,7 @@ def pretrain(model, cfg):
         shuffle=cfg.dataloader.shuffle,
         drop_last=cfg.dataloader.drop_last,
         num_workers=cfg.dataloader.num_workers,
-        # pin_memory=cfg.dataloader.pin_memory,
+        pin_memory=cfg.dataloader.pin_memory,
         prefetch_factor=cfg.dataloader.prefetch_factor,
         persistent_workers=cfg.dataloader.persistent_workers,
         collate_fn=train_dataset.collate_fn,
@@ -131,6 +131,7 @@ def pretrain(model, cfg):
         epoch_loss = []
         total_iters = len(train_loader)
         for step, pixel_values in enumerate(tqdm(train_loader), start=1):
+            pixel_values = pixel_values.cuda(non_blocking=True)
             if cfg.training.use_amp:
                 with autocast():
                     l = model(pixel_values)
@@ -210,7 +211,15 @@ if __name__ == '__main__':
         pkl_files = sorted(pkl_files, key=lambda x: int(r.match(x).group(1)))
         pkl_file = pkl_files[-1]
         model = Mae(cfg.model).to(cfg.training.device)
-        model.load_state_dict(torch.load(os.path.join(cfg.pkl_dir, pkl_file)))
+
+        model_state_dict = torch.load(os.path.join(cfg.pkl_dir, pkl_file))
+        new_state_dict = OrderedDict()
+        for k, v in model_state_dict.items():
+            name = k[7:]
+            new_state_dict[name] = v
+        model.load_state_dict(new_state_dict)
+
+        # model.load_state_dict(torch.load(os.path.join(cfg.pkl_dir, pkl_file)))
         # model = torch.load(os.path.join(cfg.pkl_dir, pkl_file))
         last_epoch = pkl_file.split('_')[-1].split('.')[0]
         last_epoch = int(last_epoch.replace('epoch', ''))

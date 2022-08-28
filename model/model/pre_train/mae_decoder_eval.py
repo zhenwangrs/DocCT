@@ -15,12 +15,13 @@ from torch.optim.lr_scheduler import ExponentialLR, ConstantLR, CosineAnnealingL
 from torch.utils import data
 from torch.utils.data import DataLoader, RandomSampler
 from tqdm import tqdm
-from transformers import AutoFeatureExtractor, ViTMAEModel
-from transformers import ViTMAEConfig
+from transformers import AutoFeatureExtractor
+from mae import ViTMAEConfig, ViTMAEModel, ViTMAEForPreTraining
 
 warnings.filterwarnings("ignore")
-# torch.backends.cudnn.benchmark = True
 
+
+# torch.backends.cudnn.benchmark = True
 
 
 class MyDataset(torch.utils.data.Dataset):
@@ -63,37 +64,32 @@ class MyDataset(torch.utils.data.Dataset):
 
 
 class Mae(nn.Module):
-    def __init__(self, ckp_pth):
+    def __init__(self, docmae_state_dict):
         super().__init__()
-        self.ckp_pth = ckp_pth
-
+        self.docmae_state_dict = docmae_state_dict
         config = ViTMAEConfig(
             image_size=640,
             patch_size=20,
             mask_ratio=0,
         )
-        self.mae = ViTMAEModel(config)
+        self.mae = ViTMAEForPreTraining(config)
         self.load_from_DocMae()
-
-        # docmae672_pretrained = torch.load(self.ckp_pth)
-        # self.mae = docmae672_pretrained.mae.vit
-
-        self.cls = nn.Linear(768, len(CLASSES))
+        self.cls = nn.Linear(512, len(CLASSES))
 
     def forward(self, pixel_values):
-        output = self.mae(pixel_values)
-        output = output['last_hidden_state']
+        output = self.mae(pixel_values, return_dict=True)
+        output = output.hidden_states
         output = torch.mean(output, dim=1)
         return self.cls(output)
 
     def load_from_DocMae(self):
-        docmae_state_dict = torch.load(self.ckp_pth)
+        docmae_state_dict = self.docmae_state_dict
         mae_state_dict = self.mae.state_dict()
         for key in mae_state_dict:
-            if f'module.mae.vit.{key}' in docmae_state_dict.keys():
-                mae_state_dict[key] = docmae_state_dict[f'module.mae.vit.{key}']
-            elif f'mae.vit.{key}' in docmae_state_dict.keys():
-                mae_state_dict[key] = docmae_state_dict[f'mae.vit.{key}']
+            if f'module.mae.{key}' in docmae_state_dict.keys():
+                mae_state_dict[key] = docmae_state_dict[f'module.mae.{key}']
+            elif f'mae.{key}' in docmae_state_dict.keys():
+                mae_state_dict[key] = docmae_state_dict[f'mae.{key}']
             else:
                 raise KeyError(f'{key} not found in {self.ckp_pth}')
         self.mae.load_state_dict(mae_state_dict)
@@ -137,7 +133,8 @@ def train(model, total_epoch):
         if f1 > best_f1:
             best_f1 = f1
             torch.save(model, './ckp/mae640_cls_best.ckp')
-        logger.info(f'epoch {epoch}, val acc: {acc}, f1: {f1}, p: {p}, r: {r}, best_f1: {best_f1}, lr: {scheduler.get_last_lr()[0]}')
+        logger.info(
+            f'epoch {epoch}, val acc: {acc}, f1: {f1}, p: {p}, r: {r}, best_f1: {best_f1}, lr: {scheduler.get_last_lr()[0]}')
         # acc, f1, p, r = test(model, test_loader)
         # logger.info(f'test acc: {acc}, f1: {f1}, p: {p}, r: {r}')
         scheduler.step()
@@ -186,50 +183,64 @@ if __name__ == '__main__':
         'buildings_',
         'economy_',
         'education_',
+        'food_',
         # 'industry', 'entertainment', 'environment',
-        # 'fashion', 'food', 'geography', 'health', 'history',
+        # 'fashion',  'geography', 'health', 'history',
         # 'law', 'marriage', 'politics', 'religion', 'sports', 'science',
         # 'transport'
     ]
 
-    logger = build_logger()
+    logger = build_logger(save_path='mae_decoder_eval.log')
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     feature_extractor = AutoFeatureExtractor.from_pretrained("facebook/vit-mae-base")
     feature_extractor.size = 640
 
-    batch_accum = 8
+    batch_accum = 12
     train_dataset = MyDataset('E:/Research/DocCT/data/train', feature_extractor)
-    train_loader = DataLoader(train_dataset,
-                              batch_size=8,
-                              shuffle=True,
-                              num_workers=4,
-                              prefetch_factor=2,
-                              collate_fn=train_dataset.collate_fn)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=8,
+        shuffle=True,
+        num_workers=4,
+        prefetch_factor=2,
+        collate_fn=train_dataset.collate_fn,
+        persistent_workers=True,
+        pin_memory=True,
+    )
     val_dataset = MyDataset('E:/Research/DocCT/data/val', feature_extractor)
-    val_loader = DataLoader(val_dataset,
-                            batch_size=64,
-                            shuffle=False,
-                            num_workers=4,
-                            prefetch_factor=2,
-                            collate_fn=val_dataset.collate_fn)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=64,
+        shuffle=False,
+        num_workers=4,
+        prefetch_factor=2,
+        collate_fn=val_dataset.collate_fn,
+        persistent_workers=True,
+        pin_memory=True,
+    )
     test_dataset = MyDataset('E:/Research/DocCT/data/test', feature_extractor)
-    test_loader = DataLoader(test_dataset,
-                             batch_size=64,
-                             shuffle=False,
-                             num_workers=4,
-                             prefetch_factor=2,
-                             collate_fn=test_dataset.collate_fn)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=64,
+        shuffle=False,
+        num_workers=4,
+        prefetch_factor=2,
+        collate_fn=test_dataset.collate_fn,
+        persistent_workers=True,
+        pin_memory=True,
+    )
 
     logger.info('categories: ' + str(CLASSES))
     cfg = Munch.fromDict(yaml.safe_load(open('mae_pretrain.yaml', 'r', encoding='utf8').read()))
 
-    ckp_pth = './work_dir/pkl/DocMae640_epoch28.pkl'
-    model = Mae(ckp_pth=ckp_pth).to(device)
-    logger.info(f'ckp_path: {ckp_pth}')
+    cfg.pkl_dir = './work_dir/pkl/'
+    cfg.pkl_file = 'DocMae640_epoch30.pkl'
+    logger.info(f'ckp_path: {cfg.pkl_file}')
+
+    docmae_state_dict = torch.load(os.path.join(cfg.pkl_dir, cfg.pkl_file))
+    model = Mae(docmae_state_dict=docmae_state_dict).to(cfg.training.device)
     train(model, total_epoch=15)
+
     model = torch.load('./ckp/mae640_cls_best.ckp').to(device)
-
-    # model = torch.load('./ckp/mae640_cls.ckp').to(device)
-
     acc, f1, p, r = test(model, test_loader)
     logger.info(f'test acc: {acc}, f1: {f1}, p: {p}, r: {r}')

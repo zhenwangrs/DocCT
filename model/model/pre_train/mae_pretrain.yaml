@@ -1,7 +1,7 @@
 model:
   feature_extractor: "facebook/vit-mae-base"
-  image_size: 672
-  patch_size: 28
+  image_size: 640
+  patch_size: 20
   mask_ratio: 0.3
   use_mae: True
   use_dit: True
@@ -11,16 +11,17 @@ data:
     - "D:/dataset/IMG/"
   clean: False
   max_img_num: -1
+  crop_prob: 0.1
 
 dataloader:
   batch_accum: 16
-  batch_size: 16
+  batch_size: 8
   shuffle: True
   drop_last: False
   num_workers: 4
   pin_memory: True
   prefetch_factor: 2
-  persistent_workers: True
+  persistent_workers: False
 
 optimizer:
   type: "AdamW"
@@ -30,6 +31,7 @@ optimizer:
   weight_decay: 0.05
   scheduler: "CosineAnnealingLR"
   eta_min: 0
+  warmup_ratio: 0.0
 
 training:
   device: "cuda"
@@ -49,3 +51,9 @@ distributed:
   world_size: 1
   init_method: "tcp://127.0.0.1:23333"
   backend: "gloo"
+
+eval:
+  train_dir: "E:/Research/DocCT/data/train/"
+  val_dir: "E:/Research/DocCT/data/val/"
+  test_dir: "E:/Research/DocCT/data/test/"
+  epochs: 20

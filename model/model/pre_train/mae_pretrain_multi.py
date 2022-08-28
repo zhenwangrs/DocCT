@@ -1,8 +1,10 @@
 import argparse
+import functools
 import glob
 import logging
 import os
 import re
+from collections import OrderedDict
 from distutils import dist
 
 import numpy as np
@@ -23,6 +25,18 @@ from transformers import AutoModel, AutoFeatureExtractor
 from transformers import ViTMAEForPreTraining, ViTMAEConfig
 import torch.distributed as dist
 import torch.multiprocessing as mp
+# from fairscale.nn.data_parallel import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.fully_sharded_data_parallel import (
+    # FullyShardedDataParallel as FSDP,
+    CPUOffload,
+    BackwardPrefetch,
+)
+from torch.distributed.fsdp.wrap import (
+    default_auto_wrap_policy,
+    enable_wrap,
+    wrap,
+)
 
 from utils import *
 
@@ -41,7 +55,7 @@ class PretrainDataset(torch.utils.data.Dataset):
         img_path = self.img_paths[idx]
         try:
             image = Image.open(img_path)
-            image = image_random_crop(image)
+            image = image_random_crop(image, prob=self.cfg.data.crop_prob)
             if image.mode != 'RGB':
                 image = image.convert('RGB')
             return image
@@ -56,8 +70,7 @@ class PretrainDataset(torch.utils.data.Dataset):
         images = []
         for img in batch:
             images.append(img)
-        image_feats = self.feature_extractor(images=images, return_tensors="pt")['pixel_values'].cuda(
-            non_blocking=True)
+        image_feats = self.feature_extractor(images=images, return_tensors="pt")['pixel_values']
         return image_feats
 
 
@@ -117,7 +130,7 @@ def pretrain(model, cfg):
                   lr=cfg.optimizer.lr,
                   betas=(cfg.optimizer.beta1, cfg.optimizer.beta2),
                   weight_decay=cfg.optimizer.weight_decay)
-    scheduler = CosineAnnealingLR(optim, T_max=cfg.optimizer.T_max, eta_min=cfg.optimizer.eta_min)
+    scheduler = CosineAnnealingLR(optim, T_max=cfg.training.epochs, eta_min=cfg.optimizer.eta_min)
     for epoch in range(cfg.training.start_epoch - 1):
         scheduler.step()
 
@@ -135,7 +148,7 @@ def pretrain(model, cfg):
         shuffle=cfg.dataloader.shuffle and not cfg.distributed.dist,
         drop_last=cfg.dataloader.drop_last,
         num_workers=cfg.dataloader.num_workers,
-        # pin_memory=cfg.dataloader.pin_memory,
+        pin_memory=cfg.dataloader.pin_memory,
         prefetch_factor=cfg.dataloader.prefetch_factor,
         persistent_workers=cfg.dataloader.persistent_workers,
         collate_fn=train_dataset.collate_fn,
@@ -148,6 +161,7 @@ def pretrain(model, cfg):
         total_iters = len(train_loader)
         train_sampler.set_epoch(epoch)
         for step, pixel_values in enumerate(tqdm(train_loader), start=1):
+            pixel_values = pixel_values.to(cfg.training.device, non_blocking=True)
             if cfg.training.use_amp:
                 with autocast():
                     l = model(pixel_values)
@@ -166,21 +180,24 @@ def pretrain(model, cfg):
             loss_value = np.around(l.item(), 4)
             tensorboard_writer.add_scalar('loss', loss_value, epoch * len(train_loader) + step)
             epoch_loss.append(loss_value)
-            if step % cfg.training.loss_print_interval == 0:
+            if step % cfg.training.loss_print_interval == 0 and cfg.distributed.local_rank == 0:
                 avg_epoch_loss = np.around(np.mean(epoch_loss), 4)
                 logger.info(
                     f'epoch: [{epoch}/{cfg.training.epochs}], iter: [{step}/{total_iters}], batch_loss: {loss_value}, epoch_loss: {avg_epoch_loss}')
-            if step % cfg.training.step_save_interval == 0:
-                model_save_path = f'{cfg.ckp_dir}/{cfg.training.model_save_name}'.format(cfg.model.image_size, epoch)
-                torch.save(model, model_save_path)
+            if step % cfg.training.step_save_interval == 0 and cfg.distributed.local_rank == 0:
+                model_save_path = f'{cfg.pkl_dir}/{cfg.training.model_save_name}'.format(cfg.model.image_size, epoch)
+                torch.save(model.state_dict(), model_save_path)
 
-        if epoch % cfg.training.epoch_save_interval == 0:
-            model_save_path = f'{cfg.ckp_dir}/{cfg.training.model_save_name}'.format(cfg.model.image_size, epoch)
-            torch.save(model, model_save_path)
+        if epoch % cfg.training.epoch_save_interval == 0 and cfg.distributed.local_rank == 0:
+            model_save_path = f'{cfg.pkl_dir}/{cfg.training.model_save_name}'.format(cfg.model.image_size, epoch)
+            torch.save(model.state_dict(), model_save_path)
 
-        avg_epoch_loss = np.around(np.mean(epoch_loss), 4)
-        logger.info(f'epoch: {epoch}, epoch_avg_loss: {avg_epoch_loss}, lr: {np.around(scheduler.get_last_lr(), 6)}')
-        tensorboard_writer.add_scalar('epoch_loss', avg_epoch_loss, epoch)
+        if cfg.distributed.local_rank == 0:
+            avg_epoch_loss = np.around(np.mean(epoch_loss), 4)
+            logger.info(
+                f'epoch: {epoch}, epoch_avg_loss: {avg_epoch_loss}, lr: {np.around(scheduler.get_last_lr(), 6)}')
+            tensorboard_writer.add_scalar('epoch_loss', avg_epoch_loss, epoch)
+
         scheduler.step()
 
 
@@ -214,38 +231,61 @@ def main(rank, args):
 
     work_dir = args.work_dir
     log_dir = os.path.join(work_dir, 'log')
-    ckp_dir = os.path.join(work_dir, 'ckp')
+    pkl_dir = os.path.join(work_dir, 'pkl')
     tensorboard_dir = os.path.join(work_dir, 'tensorboard')
     if not os.path.exists(work_dir):
         os.makedirs(work_dir)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
-    if not os.path.exists(ckp_dir):
-        os.makedirs(ckp_dir)
+    if not os.path.exists(pkl_dir):
+        os.makedirs(pkl_dir)
     if not os.path.exists(tensorboard_dir):
         os.makedirs(tensorboard_dir)
     cfg.work_dir = work_dir
     cfg.log_dir = log_dir
-    cfg.ckp_dir = ckp_dir
+    cfg.pkl_dir = pkl_dir
     cfg.tensorboard_dir = tensorboard_dir
 
     if not args.resume:
         model = Mae(cfg.model).to(cfg.training.device)
-        model_save_path = f'{cfg.ckp_dir}/{cfg.training.model_save_name}'.format(cfg.model.image_size, 0)
-        torch.save(model, model_save_path)
+        model_save_path = f'{cfg.pkl_dir}/{cfg.training.model_save_name}'.format(cfg.model.image_size, 0)
+        torch.save(model.state_dict(), model_save_path)
         cfg.start_epoch = 1
     else:
-        r = re.compile(r'^.*_epoch(\d+)\.ckp$')
-        ckp_files = [os.path.basename(f) for f in glob.glob(os.path.join(cfg.ckp_dir, '*.ckp'))]
-        ckp_files = sorted(ckp_files, key=lambda x: int(r.match(x).group(1)))
-        ckp_file = ckp_files[-1]
-        model = torch.load(os.path.join(cfg.ckp_dir, ckp_file))
-        last_epoch = ckp_file.split('_')[-1].split('.')[0]
+        r = re.compile(r'^.*_epoch(\d+)\.pkl$')
+        pkl_files = [os.path.basename(f) for f in glob.glob(os.path.join(cfg.pkl_dir, '*.pkl'))]
+        pkl_files = sorted(pkl_files, key=lambda x: int(r.match(x).group(1)))
+        pkl_file = pkl_files[-1]
+        model = Mae(cfg.model).to(cfg.training.device)
+
+        model_state_dict = torch.load(os.path.join(cfg.pkl_dir, pkl_file))
+        if 'module' in list(model_state_dict.keys())[0]:
+            new_state_dict = OrderedDict()
+            for k, v in model_state_dict.items():
+                name = k[7:]
+                new_state_dict[name] = v
+            model.load_state_dict(new_state_dict)
+        else:
+            model.load_state_dict(torch.load(os.path.join(cfg.pkl_dir, pkl_file)))
+            model = torch.load(os.path.join(cfg.pkl_dir, pkl_file))
+
+        last_epoch = pkl_file.split('_')[-1].split('.')[0]
         last_epoch = int(last_epoch.replace('epoch', ''))
         cfg.training.start_epoch = last_epoch + 1
 
+    for param in model.parameters():
+        param.requires_grad = True
     if cfg.distributed.dist:
         model = DistributedDataParallel(model, device_ids=[cfg.distributed.local_rank])
+        # torch.cuda.set_device(cfg.distributed.local_rank)
+        # my_auto_wrap_policy = functools.partial(
+        #     default_auto_wrap_policy, min_num_params=20000
+        # )
+        # model.to(cfg.training.device)
+        # model = FSDP(model,
+        #              fsdp_auto_wrap_policy=my_auto_wrap_policy,
+        #              cpu_offload=CPUOffload(offload_params=True)
+        #              )
 
     model.to(cfg.training.device)
     pretrain(model, cfg)
@@ -256,6 +296,7 @@ def run_multi(fn, world_size, args):
 
 
 if __name__ == '__main__':
+    torch.multiprocessing.set_start_method('spawn')
     args = get_args()
     run_multi(main, torch.cuda.device_count(), args=args)
     # main(args=get_args())
