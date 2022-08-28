@@ -239,7 +239,7 @@ if __name__ == '__main__':
 
     docmae_state_dict = torch.load(os.path.join(cfg.pkl_dir, cfg.pkl_file))
     model = Mae(docmae_state_dict=docmae_state_dict).to(cfg.training.device)
-    train(model, total_epoch=15)
+    train(model, total_epoch=cfg.eval.epochs)
 
     model = torch.load('./ckp/mae640_cls_best.ckp').to(device)
     acc, f1, p, r = test(model, test_loader)
